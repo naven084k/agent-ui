@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     default_model: str = "gpt-4o-mini"
     sqlite_path: str = "backend/data/app.db"
+    serpapi_key: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

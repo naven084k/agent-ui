@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   asChild?: boolean;
-  variant?: "default" | "ghost" | "outline" | "danger";
+  variant?: "default" | "ghost" | "outline" | "accent" | "danger";
   size?: "sm" | "md" | "icon";
 };
 
@@ -20,14 +20,15 @@ export function Button({
   return (
     <Comp
       className={cn(
-        "inline-flex items-center justify-center rounded-xl font-medium transition duration-200 disabled:cursor-not-allowed disabled:opacity-50",
-        variant === "default" && "bg-black text-white hover:bg-neutral-800",
-        variant === "ghost" && "bg-transparent text-foreground hover:bg-black/5",
-        variant === "outline" && "border border-border bg-white hover:bg-black/5",
-        variant === "danger" && "bg-black text-white hover:bg-neutral-800",
-        size === "sm" && "h-9 px-3 text-sm",
-        size === "md" && "h-11 px-4 text-sm",
-        size === "icon" && "h-10 w-10",
+        "inline-flex items-center justify-center rounded-xl font-medium transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-40",
+        variant === "default" && "bg-muted text-foreground border border-border-strong hover:border-accent/30 hover:bg-muted/80",
+        variant === "ghost" && "bg-transparent text-muted-foreground hover:text-foreground hover:bg-muted",
+        variant === "outline" && "border border-border-strong bg-transparent text-foreground hover:border-accent/40 hover:bg-accent-dim",
+        variant === "accent" && "bg-accent text-background font-semibold hover:bg-accent/90 shadow-glow-sm",
+        variant === "danger" && "bg-danger/10 text-danger border border-danger/20 hover:bg-danger/20",
+        size === "sm" && "h-8 px-3 text-sm gap-1.5",
+        size === "md" && "h-10 px-4 text-sm gap-2",
+        size === "icon" && "h-9 w-9",
         className,
       )}
       {...props}

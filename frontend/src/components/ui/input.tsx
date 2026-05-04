@@ -6,7 +6,7 @@ export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInp
   return (
     <input
       className={cn(
-        "h-11 w-full rounded-xl border border-border bg-white px-4 text-sm text-foreground outline-none placeholder:text-neutral-400 focus:border-accent",
+        "h-9 w-full rounded-lg border border-border bg-muted px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground transition-colors focus:border-accent/40 focus:bg-muted/80",
         className,
       )}
       {...props}

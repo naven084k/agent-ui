@@ -52,7 +52,7 @@ class OpenAIClient:
         }
         if payload.get("tools"):
             body["tools"] = payload["tools"]
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = payload.get("tool_choice", "auto")
 
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(

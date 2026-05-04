@@ -9,21 +9,21 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_chat(title: str, model: str, system_prompt: str | None) -> ChatSummary:
+def create_chat(title: str, model: str, system_prompt: str | None, client_id: str) -> ChatSummary:
     chat_id = str(uuid4())
     timestamp = now_iso()
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO chats(id, title, model, system_prompt, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO chats(id, client_id, title, model, system_prompt, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (chat_id, title, model, system_prompt, timestamp, timestamp),
+            (chat_id, client_id, title, model, system_prompt, timestamp, timestamp),
         )
-    return get_chat(chat_id)
+    return get_chat(chat_id, client_id)
 
 
-def list_chats(query: str = "") -> list[ChatSummary]:
+def list_chats(client_id: str, query: str = "") -> list[ChatSummary]:
     sql = """
         SELECT c.*,
                COALESCE(
@@ -31,10 +31,11 @@ def list_chats(query: str = "") -> list[ChatSummary]:
                    ''
                ) AS last_message
         FROM chats c
+        WHERE c.client_id = ?
     """
-    params: list[str] = []
+    params: list[str] = [client_id]
     if query:
-        sql += " WHERE c.title LIKE ? OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.content LIKE ?)"
+        sql += " AND (c.title LIKE ? OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.content LIKE ?))"
         like = f"%{query}%"
         params.extend([like, like])
     sql += " ORDER BY c.pinned DESC, c.updated_at DESC"
@@ -43,7 +44,7 @@ def list_chats(query: str = "") -> list[ChatSummary]:
     return [ChatSummary(**dict(row)) for row in rows]
 
 
-def get_chat(chat_id: str) -> ChatDetail:
+def get_chat(chat_id: str, client_id: str) -> ChatDetail:
     with get_conn() as conn:
         chat = conn.execute(
             """
@@ -53,9 +54,9 @@ def get_chat(chat_id: str) -> ChatDetail:
                        ''
                    ) AS last_message
             FROM chats c
-            WHERE c.id = ?
+            WHERE c.id = ? AND c.client_id = ?
             """,
-            (chat_id,),
+            (chat_id, client_id),
         ).fetchone()
         messages = conn.execute(
             "SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC",
@@ -77,20 +78,20 @@ def get_chat(chat_id: str) -> ChatDetail:
     return ChatDetail(**payload)
 
 
-def update_chat(chat_id: str, **changes) -> ChatDetail:
+def update_chat(chat_id: str, client_id: str, **changes) -> ChatDetail:
     allowed = {key: value for key, value in changes.items() if value is not None}
     if allowed:
         fields = ", ".join([f"{key} = ?" for key in allowed] + ["updated_at = ?"])
-        params = [*allowed.values(), now_iso(), chat_id]
+        params = [*allowed.values(), now_iso(), chat_id, client_id]
         with get_conn() as conn:
-            conn.execute(f"UPDATE chats SET {fields} WHERE id = ?", params)
-    return get_chat(chat_id)
+            conn.execute(f"UPDATE chats SET {fields} WHERE id = ? AND client_id = ?", params)
+    return get_chat(chat_id, client_id)
 
 
-def delete_chat(chat_id: str) -> None:
+def delete_chat(chat_id: str, client_id: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
-        conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        conn.execute("DELETE FROM chats WHERE id = ? AND client_id = ?", (chat_id, client_id))
 
 
 def add_message(

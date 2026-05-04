@@ -2,10 +2,27 @@ import type { ChatDetail, ChatSummary, ModelInfo } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+function getClientId(): string {
+  const KEY = "nexora_client_id";
+  let id = localStorage.getItem(KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(KEY, id);
+  }
+  return id;
+}
+
+function baseHeaders(): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    "X-Client-ID": getClientId(),
+  };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
-      "Content-Type": "application/json",
+      ...baseHeaders(),
       ...(init?.headers ?? {}),
     },
     ...init,
@@ -41,7 +58,7 @@ export const api = {
   async streamChat(payload: Record<string, unknown>, onEvent: (event: any) => void, signal?: AbortSignal) {
     const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: baseHeaders(),
       body: JSON.stringify(payload),
       signal,
     });
@@ -61,7 +78,9 @@ export const api = {
       buffer = parts.pop() ?? "";
       for (const line of parts) {
         if (!line.trim()) continue;
-        onEvent(JSON.parse(line));
+        const event = JSON.parse(line);
+        if (event.type === "error") throw new Error(event.data);
+        onEvent(event);
       }
     }
   },

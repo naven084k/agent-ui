@@ -5,11 +5,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatSidebar } from "@/components/chat-sidebar";
 import { Composer } from "@/components/composer";
 import { MessageBubble } from "@/components/message-bubble";
-import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import type { ChatDetail, ChatSummary, Message, ModelInfo, ToolEvent } from "@/lib/types";
 
-const DEFAULT_MODEL = import.meta.env.VITE_DEFAULT_MODEL ?? "gpt-5.4-mini";
+const DEFAULT_MODEL = import.meta.env.VITE_DEFAULT_MODEL ?? "gpt-4o-mini";
+
+const SUGGESTIONS = [
+  "What's the weather in New York right now?",
+  "What is Apple's current stock price?",
+  "Convert 1000 USD to EUR",
+  "Air quality in Delhi today",
+];
+
+const EMPTY_TITLE = "How can I help?";
+const EMPTY_SUBTITLE = "Ask me anything. I can answer questions, look things up, and help you get things done.";
 
 export default function App() {
   const [chats, setChats] = useState<ChatSummary[]>([]);
@@ -24,15 +33,10 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const activeMessages = activeChat?.messages ?? [];
+  const isEmpty = activeMessages.length === 0;
 
-  useEffect(() => {
-    void bootstrap();
-  }, []);
-
-  useEffect(() => {
-    void loadChats(search);
-  }, [search]);
-
+  useEffect(() => { void bootstrap(); }, []);
+  useEffect(() => { void loadChats(search); }, [search]);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activeMessages]);
@@ -46,7 +50,6 @@ export default function App() {
       api.listChats(),
       api.getModels().catch(() => []),
     ]);
-    console.log("[bootstrap] chats", loadedChats.length, "models", loadedModels.map((model) => model.name));
     setChats(loadedChats);
     setModels(loadedModels);
     setSelectedModel(loadedModels[0]?.name || DEFAULT_MODEL);
@@ -56,10 +59,7 @@ export default function App() {
       setSelectedModel(detail.model || loadedModels[0]?.name || DEFAULT_MODEL);
     } else {
       const model = loadedModels[0]?.name || DEFAULT_MODEL;
-      const chat = await api.createChat({
-        title: "New chat",
-        model,
-      });
+      const chat = await api.createChat({ title: "New chat", model });
       setActiveChat(chat);
       setChats([chat]);
       setSelectedModel(model);
@@ -67,27 +67,20 @@ export default function App() {
   }
 
   async function loadChats(query: string) {
-    const loaded = await api.listChats(query);
-    console.log("[loadChats] query", query, "count", loaded.length);
-    setChats(loaded);
+    setChats(await api.listChats(query));
   }
 
   async function selectChat(chatId: string) {
     const detail = await api.getChat(chatId);
-    console.log("[selectChat] chat", chatId, "model", detail.model);
     setActiveChat(detail);
     setSelectedModel(detail.model || DEFAULT_MODEL);
   }
 
   async function createChat() {
     const model = selectedModel || models[0]?.name || DEFAULT_MODEL;
-    console.log("[createChat] creating chat with model", model);
-    const chat = await api.createChat({
-      title: "New chat",
-      model,
-    });
+    const chat = await api.createChat({ title: "New chat", model });
     setActiveChat(chat);
-    setChats((current) => [chat, ...current]);
+    setChats((prev) => [chat, ...prev]);
     setSelectedModel(model);
     return chat;
   }
@@ -96,12 +89,9 @@ export default function App() {
     let sourceChat = chatOverride ?? activeChat;
     const content = contentOverride ?? composer;
     if (!content.trim() || streaming) return;
-    if (!sourceChat) {
-      console.log("[sendMessage] no active chat; creating one first");
-      sourceChat = await createChat();
-    }
+    if (!sourceChat) sourceChat = await createChat();
+
     const model = resolveModel(sourceChat);
-    console.log("[sendMessage] chat", sourceChat.id, "model", model, "contentLength", content.length);
     setError("");
     setStreaming(true);
 
@@ -124,8 +114,7 @@ export default function App() {
       created_at: new Date().toISOString(),
     };
 
-    const updatedChat = { ...sourceChat, model, messages: [...sourceChat.messages, nextMessage, placeholder] };
-    setActiveChat(updatedChat);
+    setActiveChat({ ...sourceChat, model, messages: [...sourceChat.messages, nextMessage, placeholder] });
     setComposer("");
 
     const controller = new AbortController();
@@ -138,33 +127,28 @@ export default function App() {
           chat_id: sourceChat.id,
           model,
           system_prompt: sourceChat.system_prompt || "",
-          messages: [...sourceChat.messages, nextMessage].map((message) => ({
-            role: message.role,
-            content: message.content,
+          messages: [...sourceChat.messages, nextMessage].map((m) => ({
+            role: m.role,
+            content: m.content,
             attachments: [],
           })),
           use_tools: true,
         },
         (event) => {
-          if (event.type !== "token") {
-            console.log("[stream event]", event.type, event.data);
-          }
           setActiveChat((current) => {
             if (!current) return current;
             const messages = [...current.messages];
-            const assistant = messages[messages.length - 1];
-            if (!assistant) return current;
-            if (event.type === "token") {
-              assistant.content += event.data;
-            }
+            const last = messages[messages.length - 1];
+            if (!last) return current;
+            if (event.type === "token") last.content += event.data;
             if (event.type === "tool_start") {
               toolEvents.push({ ...event.data, status: "running", output: "" });
-              assistant.tool_events = [...toolEvents];
+              last.tool_events = [...toolEvents];
             }
             if (event.type === "tool_end") {
-              const index = toolEvents.findIndex((item) => item.id === event.data.id);
-              if (index >= 0) toolEvents[index] = event.data;
-              assistant.tool_events = [...toolEvents];
+              const i = toolEvents.findIndex((t) => t.id === event.data.id);
+              if (i >= 0) toolEvents[i] = event.data;
+              last.tool_events = [...toolEvents];
             }
             return { ...current, messages };
           });
@@ -172,9 +156,8 @@ export default function App() {
         controller.signal,
       );
       await Promise.all([loadChats(search), selectChat(sourceChat.id)]);
-    } catch (streamError) {
-      console.error("[sendMessage] stream failed", streamError);
-      setError(streamError instanceof Error ? streamError.message : "Streaming failed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       abortRef.current = null;
       setStreaming(false);
@@ -182,26 +165,19 @@ export default function App() {
   }
 
   async function stopStreaming() {
-    console.log("[stopStreaming] abort requested");
     abortRef.current?.abort();
     setStreaming(false);
   }
 
   async function regenerateResponse() {
     if (!activeChat || streaming) return;
-    console.log("[regenerate] chat", activeChat.id);
     const refreshed = await api.regenerate(activeChat.id);
-    const userMessages = refreshed.messages.filter((message) => message.role === "user");
-    const lastUser = userMessages[userMessages.length - 1];
-    if (!lastUser) {
-      console.warn("[regenerate] no last user message found");
-      setActiveChat(refreshed);
-      return;
-    }
+    const lastUser = [...refreshed.messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) { setActiveChat(refreshed); return; }
     await sendMessage(lastUser.content, refreshed);
   }
 
-  const headerTitle = useMemo(() => activeChat?.title || "Nexora Agent", [activeChat?.title]);
+  const headerTitle = useMemo(() => activeChat?.title || "New conversation", [activeChat?.title]);
   const lastMessage = activeMessages[activeMessages.length - 1];
   const loadingMessageId = streaming && lastMessage?.role === "assistant" ? lastMessage.id : undefined;
 
@@ -213,21 +189,19 @@ export default function App() {
         search={search}
         onSearch={setSearch}
         onCreate={() => void createChat()}
-        onSelect={(chatId) => void selectChat(chatId)}
-        onDelete={async (chatId) => {
-          await api.deleteChat(chatId);
+        onSelect={(id) => void selectChat(id)}
+        onDelete={async (id) => {
+          await api.deleteChat(id);
           const refreshed = await api.listChats(search);
           setChats(refreshed);
-          if (activeChat?.id === chatId) {
-            setActiveChat(null);
-          }
+          if (activeChat?.id === id) setActiveChat(null);
         }}
-        onRename={async (chatId) => {
-          const title = window.prompt("Rename chat");
+        onRename={async (id) => {
+          const title = window.prompt("Rename conversation");
           if (!title) return;
-          await api.updateChat(chatId, { title });
+          await api.updateChat(id, { title });
           await loadChats(search);
-          if (activeChat?.id === chatId) await selectChat(chatId);
+          if (activeChat?.id === id) await selectChat(id);
         }}
         onPin={async (chat) => {
           await api.updateChat(chat.id, { pinned: !chat.pinned });
@@ -235,58 +209,84 @@ export default function App() {
         }}
       />
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border px-6 py-4">
-          <div>
-            <h1 className="text-2xl font-semibold">{headerTitle}</h1>
-          </div>
+      <main className="flex min-w-0 flex-1 flex-col bg-white">
+        {/* Header */}
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
+          <span className="text-sm font-medium text-foreground/50 truncate max-w-xs">
+            {headerTitle}
+          </span>
           <div className="flex items-center gap-2">
+            {!!activeMessages.length && !streaming && (
+              <button
+                onClick={() => void regenerateResponse()}
+                type="button"
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <RefreshCcw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            )}
+            <span className="rounded-md border border-border bg-muted px-2.5 py-1 font-mono text-[11px] text-muted-foreground">
+              {resolveModel(activeChat)}
+            </span>
           </div>
         </header>
 
-        <section className="flex min-h-0 flex-1 flex-col px-6">
-          <div className="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto py-6">
-            <AnimatePresence initial={false}>
-                {activeMessages.map((message) => (
-                  <MessageBubble key={message.id} message={message} loading={message.id === loadingMessageId} />
+        {/* Scrollable message area */}
+        <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+          {isEmpty ? (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="flex h-full flex-col items-center justify-center px-6 py-16"
+            >
+              <h2 className="font-display text-[28px] font-bold text-foreground">
+                {EMPTY_TITLE}
+              </h2>
+              <p className="mt-2 max-w-[340px] text-center text-[15px] leading-relaxed text-muted-foreground">
+                {EMPTY_SUBTITLE}
+              </p>
+
+              <div className="mt-10 grid w-full max-w-xl grid-cols-2 gap-2">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => { setComposer(s); }}
+                    className="group rounded-xl border border-border bg-white px-4 py-3.5 text-left text-[13px] font-medium text-foreground/60 shadow-panel transition-all hover:border-accent/30 hover:text-foreground hover:shadow-soft"
+                  >
+                    {s}
+                  </button>
                 ))}
-            </AnimatePresence>
-            {!activeMessages.length && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex h-full items-center justify-center">
-                <div className="max-w-xl rounded-[32px] border border-border bg-panel p-8 text-center shadow-soft">
-                  <h2 className="mb-3 text-3xl font-semibold">Nexora Agent</h2>
-                  <p className="text-neutral-500">A minimal AI workspace powered by OpenAI.</p>
+              </div>
+            </motion.div>
+          ) : (
+            <div className="mx-auto w-full max-w-chat px-6 py-8">
+              <AnimatePresence initial={false}>
+                <div className="space-y-8">
+                  {activeMessages.map((message) => (
+                    <MessageBubble
+                      key={message.id}
+                      message={message}
+                      loading={message.id === loadingMessageId}
+                    />
+                  ))}
                 </div>
-              </motion.div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {error && <div className="mb-3 rounded-2xl border border-black/20 bg-black/5 px-4 py-3 text-sm text-black">{error}</div>}
-
-          <div className="sticky bottom-0 pb-6 pt-4">
-            <div className="mb-2 flex justify-end gap-2 px-1">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void regenerateResponse()}
-              >
-                <RefreshCcw className="mr-2 h-4 w-4" />
-                Regenerate
-              </Button>
-              {!!activeChat?.messages.length && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    const lastUser = [...(activeChat?.messages ?? [])].reverse().find((message) => message.role === "user");
-                    if (lastUser) setComposer(lastUser.content);
-                  }}
-                >
-                  Edit last
-                </Button>
-              )}
+              </AnimatePresence>
+              <div ref={messagesEndRef} className="h-4" />
             </div>
+          )}
+        </div>
+
+        {/* Composer */}
+        <div className="shrink-0 border-t border-border bg-white px-4 pb-5 pt-3">
+          <div className="mx-auto w-full max-w-chat">
+            {error && (
+              <div className="mb-3 flex items-start gap-2 rounded-xl border border-danger/20 bg-danger/5 px-4 py-2.5">
+                <span className="text-sm text-danger/90">{error}</span>
+              </div>
+            )}
             <Composer
               value={composer}
               onChange={setComposer}
@@ -294,8 +294,13 @@ export default function App() {
               onStop={() => void stopStreaming()}
               streaming={streaming}
             />
+            <p className="mt-2.5 text-center text-[11px] text-muted-foreground/50">
+              <kbd className="rounded border border-border/80 px-1 py-0.5 font-mono text-[10px]">Enter</kbd> to send
+              {" · "}
+              <kbd className="rounded border border-border/80 px-1 py-0.5 font-mono text-[10px]">Shift+Enter</kbd> for newline
+            </p>
           </div>
-        </section>
+        </div>
       </main>
     </div>
   );

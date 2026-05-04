@@ -1,9 +1,8 @@
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { MessageSquarePlus, Pin, Search, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { formatDate } from "@/lib/utils";
+import { timeAgo } from "@/lib/utils";
 import type { ChatSummary } from "@/lib/types";
 
 type Props = {
@@ -19,72 +18,109 @@ type Props = {
 };
 
 export function ChatSidebar(props: Props) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
   return (
-    <aside className="flex h-full w-[320px] flex-col border-r border-border bg-white p-4">
-      <Button className="mb-4 w-full justify-start gap-2" onClick={props.onCreate}>
-        <MessageSquarePlus className="h-4 w-4" />
-        New Chat
-      </Button>
-      <div className="relative mb-4">
-        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
-        <Input className="pl-10" placeholder="Search chats" value={props.search} onChange={(e) => props.onSearch(e.target.value)} />
+    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-sidebar">
+      {/* Brand */}
+      <div className="flex h-14 shrink-0 items-center border-b border-border px-5">
+        <span className="font-display text-lg font-bold tracking-tight text-foreground">Nexora</span>
       </div>
-      <div className="scrollbar-thin flex-1 space-y-2 overflow-y-auto pr-1">
+
+      {/* New conversation */}
+      <div className="shrink-0 p-3">
+        <button
+          onClick={props.onCreate}
+          type="button"
+          className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border-strong px-3 py-2.5 text-sm font-medium text-muted-foreground transition-all hover:border-accent/40 hover:bg-white hover:text-accent"
+        >
+          <Plus className="h-4 w-4 shrink-0" />
+          New conversation
+        </button>
+      </div>
+
+      {/* Section label */}
+      {props.chats.length > 0 && (
+        <div className="shrink-0 px-4 pb-2 pt-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">
+            Recent
+          </p>
+        </div>
+      )}
+
+      {/* Chat list */}
+      <div className="scrollbar-thin flex-1 overflow-y-auto px-3 pb-4">
         <AnimatePresence initial={false}>
-          {props.chats.map((chat) => (
-            <motion.button
-              layout
-              key={chat.id}
-              type="button"
-              onClick={() => props.onSelect(chat.id)}
-              className={`w-full rounded-2xl border p-3 text-left transition ${
-                props.currentChatId === chat.id
-                  ? "border-black bg-black/[0.03]"
-                  : "border-transparent bg-white hover:border-border hover:bg-black/[0.02]"
-              }`}
-            >
-              <div className="mb-2 flex items-start justify-between gap-2">
-                <div>
-                  <div className="line-clamp-1 text-sm font-medium">{chat.title}</div>
-                  <div className="text-xs text-neutral-500">{formatDate(chat.updated_at)}</div>
+          {props.chats.map((chat) => {
+            const isActive = props.currentChatId === chat.id;
+            const isHovered = hoveredId === chat.id;
+            return (
+              <motion.div
+                key={chat.id}
+                layout
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.15 }}
+                onMouseEnter={() => setHoveredId(chat.id)}
+                onMouseLeave={() => setHoveredId(null)}
+                className={`relative mb-1 min-w-0 rounded-xl transition-all ${
+                  isActive
+                    ? "bg-white shadow-card border border-border"
+                    : "hover:bg-white/80 border border-transparent"
+                }`}
+              >
+                {/* Active accent bar */}
+                {isActive && (
+                  <div className="absolute left-0 top-3 bottom-3 w-[3px] rounded-full bg-accent" />
+                )}
+
+                <div className="flex w-full items-start px-3 py-2.5">
+                  <button
+                    type="button"
+                    onClick={() => props.onSelect(chat.id)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    {/* Title row */}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`truncate text-[13px] font-semibold leading-snug ${isActive ? "text-foreground" : "text-foreground/70"}`}>
+                        {chat.title}
+                      </span>
+                      {!isHovered && (
+                        <span className="shrink-0 text-[10px] text-muted-foreground/50">
+                          {timeAgo(chat.updated_at)}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Preview */}
+                    <p className="mt-1 truncate text-[12px] leading-relaxed text-muted-foreground/60">
+                      {chat.last_message || "No messages yet"}
+                    </p>
+                  </button>
+
+                  {/* Delete — visible on hover */}
+                  {isHovered && (
+                    <button
+                      type="button"
+                      title="Delete"
+                      onClick={(e) => { e.stopPropagation(); props.onDelete(chat.id); }}
+                      className="ml-1 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-100 hover:text-red-500"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    className="rounded-lg p-2 hover:bg-white/10"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onPin(chat);
-                    }}
-                    type="button"
-                  >
-                    <Pin className={`h-3.5 w-3.5 ${chat.pinned ? "fill-current text-black" : "text-neutral-400"}`} />
-                  </button>
-                  <button
-                    className="rounded-lg p-2 hover:bg-white/10"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onRename(chat.id);
-                    }}
-                    type="button"
-                  >
-                    <span className="text-xs text-neutral-400">Aa</span>
-                  </button>
-                  <button
-                    className="rounded-lg p-2 hover:bg-white/10"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onDelete(chat.id);
-                    }}
-                    type="button"
-                  >
-                    <Trash2 className="h-3.5 w-3.5 text-neutral-400" />
-                  </button>
-                </div>
-              </div>
-              <div className="line-clamp-2 text-xs text-neutral-500">{chat.last_message || "No messages yet"}</div>
-            </motion.button>
-          ))}
+              </motion.div>
+            );
+          })}
         </AnimatePresence>
+
+        {props.chats.length === 0 && (
+          <p className="px-2 py-8 text-center text-xs text-muted-foreground">
+            No conversations yet
+          </p>
+        )}
       </div>
     </aside>
   );

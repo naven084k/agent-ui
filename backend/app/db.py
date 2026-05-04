@@ -21,6 +21,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS chats (
                 id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL DEFAULT '',
                 title TEXT NOT NULL,
                 model TEXT NOT NULL,
                 system_prompt TEXT,
@@ -41,6 +42,11 @@ def init_db() -> None:
             );
             """
         )
+        # Migrate existing databases that predate the client_id column
+        try:
+            conn.execute("ALTER TABLE chats ADD COLUMN client_id TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 @contextmanager

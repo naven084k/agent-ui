@@ -6,11 +6,17 @@ from typing import Any
 from uuid import uuid4
 
 from .openai import openai
-from .tools import execute_tool, get_tool_specs
+from .tools import execute_tool, TOOL_SPECS
 
 
-MAX_HISTORY_MESSAGES = 12
+MAX_HISTORY_MESSAGES = 20
 MAX_TOOL_ROUNDS = 3
+
+ROUTER_PROMPT = (
+    "You are a request router. Select the best agent for the user's message.\n"
+    "Reply with ONLY the agent key — no explanation, no punctuation.\n\n"
+    "Agents:\n{agents}"
+)
 
 
 @dataclass(frozen=True)
@@ -21,259 +27,195 @@ class AgentProfile:
     tool_names: tuple[str, ...]
 
 
-AGENT_PROFILES: dict[str, AgentProfile] = {
-    "general": AgentProfile(
-        name="GeneralAgent",
-        description="Fallback assistant for general questions and local workspace tasks.",
-        system_prompt=(
-            "You are GeneralAgent. Answer clearly and directly. Use tools when needed, but do not overuse them. "
-            "If a specialist domain is not obvious, solve the user's request pragmatically."
-        ),
-        tool_names=("read_local_file", "run_python", "web_search", "news_search", "social_updates"),
-    ),
-    "finance": AgentProfile(
-        name="FinanceAgent",
-        description="Handles market quotes, macro moves, finance news, and concise financial summaries.",
-        system_prompt=(
-            "You are FinanceAgent. Focus on financial accuracy, recent market context, and concise interpretation. "
-            "When discussing prices, mention that the numbers are tool-fetched and can move. Prefer finance, news, and web tools."
-        ),
-        tool_names=("finance_lookup", "news_search", "web_search"),
-    ),
-    "stock_research": AgentProfile(
-        name="StockResearchAgent",
-        description="Handles equity research, company-specific analysis, catalysts, and sentiment checks.",
-        system_prompt=(
-            "You are StockResearchAgent. Produce high-signal stock research: latest price context, catalysts, risks, recent news, "
-            "and market sentiment. Cross-check with both market data and recent news. Use social updates only as soft sentiment, not fact."
-        ),
-        tool_names=("finance_lookup", "news_search", "web_search", "social_updates"),
-    ),
+AGENTS: dict[str, AgentProfile] = {
     "weather": AgentProfile(
         name="WeatherAgent",
-        description="Handles current weather and short forecasts.",
+        description="ONLY for weather: current conditions, forecasts, and air quality for any location.",
         system_prompt=(
-            "You are WeatherAgent. Give concise location-specific weather answers, highlight temperatures, conditions, wind, and "
-            "forecast changes. If a forecast is relevant, use the forecast tool instead of guessing."
+            "You are a weather assistant. Always use tools to fetch real data — "
+            "never guess or fabricate weather information. Be concise and clear."
         ),
-        tool_names=("weather_lookup", "weather_forecast", "web_search"),
+        tool_names=("weather_current", "weather_forecast", "air_quality"),
     ),
-    "news": AgentProfile(
-        name="NewsAgent",
-        description="Handles current events, headline summaries, and topical updates.",
+    "search": AgentProfile(
+        name="SearchAgent",
+        description="Everything else: stock prices, web search, Wikipedia, currency conversion, word definitions, country facts, news, and any general question.",
         system_prompt=(
-            "You are NewsAgent. Focus on recency, summarize the most important developments first, and separate confirmed reporting "
-            "from speculation. Use social updates only for supplementary public reaction, not as the primary source of facts."
+            "You are a helpful assistant with access to web search, stock data, Wikipedia, "
+            "currency rates, a dictionary, and country information. "
+            "Always call the most relevant tool before answering — never guess live data. "
+            "Be concise and cite sources when applicable."
         ),
-        tool_names=("news_search", "web_search", "social_updates"),
+        tool_names=(
+            "google_search",
+            "wikipedia_search",
+            "stock_price",
+            "currency_convert",
+            "dictionary_lookup",
+            "country_info",
+        ),
     ),
 }
 
 
-def _message_text(request: dict[str, Any]) -> str:
-    return " ".join(message.get("content", "") for message in request.get("messages", [])).lower()
+STANDARD_ROLES = {"user", "assistant", "system", "tool"}
 
 
-def fallback_agent_key(request: dict[str, Any]) -> str:
-    text = _message_text(request)
-    if any(word in text for word in ("weather", "temperature", "rain", "forecast", "humidity", "wind")):
-        return "weather"
-    if any(word in text for word in ("stock", "shares", "equity", "earnings", "valuation", "ticker", "company research")):
-        return "stock_research"
-    if any(word in text for word in ("market", "finance", "inflation", "fed", "interest rate", "bond", "forex", "crypto", "price of")):
-        return "finance"
-    if any(word in text for word in ("news", "headline", "current events", "latest update", "breaking")):
-        return "news"
-    return "general"
+def _trim(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return messages[-MAX_HISTORY_MESSAGES:] if len(messages) > MAX_HISTORY_MESSAGES else messages
 
 
-def _trim_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(messages) <= MAX_HISTORY_MESSAGES:
-        return messages
-    return messages[-MAX_HISTORY_MESSAGES:]
+def _clean(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip non-standard fields the frontend adds (e.g. attachments) before sending to OpenAI."""
+    cleaned = []
+    for m in messages:
+        if m.get("role") not in STANDARD_ROLES:
+            continue
+        entry: dict[str, Any] = {"role": m["role"], "content": m.get("content") or ""}
+        if m["role"] == "tool":
+            entry["tool_call_id"] = m["tool_call_id"]
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            entry["tool_calls"] = m["tool_calls"]
+        cleaned.append(entry)
+    return cleaned
 
 
-def _build_conversation(request: dict[str, Any], profile: AgentProfile) -> list[dict[str, Any]]:
-    trimmed_messages = _trim_messages(request.get("messages", []))
-    conversation: list[dict[str, Any]] = [{"role": "system", "content": profile.system_prompt}]
+async def _route(request: dict[str, Any]) -> AgentProfile:
+    started = perf_counter()
+    descriptions = "\n".join(f"{key}: {agent.description}" for key, agent in AGENTS.items())
+    recent = _clean(_trim(request.get("messages", [])))[-3:]
+    response = await openai.chat_once({
+        "model": request["model"],
+        "messages": [
+            {"role": "system", "content": ROUTER_PROMPT.format(agents=descriptions)},
+            *recent,
+        ],
+    })
+    raw_key = (response.get("choices") or [{}])[0].get("message", {}).get("content", "").strip().lower()
+    # Take only the first word in case the model adds punctuation or extra text
+    key = raw_key.split()[0].strip(".:,") if raw_key else ""
+    # Default to "search" (most capable) rather than "weather" on routing failure
+    agent = AGENTS.get(key) or AGENTS.get("search") or next(iter(AGENTS.values()))
+    print("[router]", {"raw_key": raw_key, "key": key, "selected": agent.name, "ms": round((perf_counter() - started) * 1000)}, flush=True)
+    return agent
+
+
+def _build_conversation(request: dict[str, Any], agent: AgentProfile) -> list[dict[str, Any]]:
+    conversation: list[dict[str, Any]] = [{"role": "system", "content": agent.system_prompt}]
     if request.get("system_prompt"):
         conversation.append({"role": "system", "content": request["system_prompt"]})
-    conversation.extend(trimmed_messages)
-    print(
-        "[agent.prepare]",
-        {
-            "agent": profile.name,
-            "input_messages": len(request.get("messages", [])),
-            "trimmed_messages": len(trimmed_messages),
-            "history_trimmed": len(request.get("messages", [])) - len(trimmed_messages),
-        },
-        flush=True,
-    )
+    conversation.extend(_clean(_trim(request.get("messages", []))))
     return conversation
 
 
-async def _decide_tool_calls(
+async def _tool_round(
     request: dict[str, Any],
-    profile: AgentProfile,
+    agent: AgentProfile,
     conversation: list[dict[str, Any]],
     round_index: int,
 ) -> dict[str, Any]:
-    started_at = perf_counter()
-    response = await openai.chat_once(
-        {
-            "model": request["model"],
-            "messages": conversation,
-            "tools": get_tool_specs(profile.tool_names),
-        }
-    )
-    elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
+    allowed = {s["function"]["name"] for s in TOOL_SPECS}
+    tools = [s for s in TOOL_SPECS if s["function"]["name"] in set(agent.tool_names) & allowed]
+    tool_names_sent = [t["function"]["name"] for t in tools]
+    # Round 1: force the model to call a tool so it never skips to a training-data answer.
+    # Round 2+: auto, so the model can synthesise the tool results into a final reply.
+    tool_choice = "required" if round_index == 1 else "auto"
+    print(f"[_tool_round] round={round_index} tool_choice={tool_choice!r} tools_sent={tool_names_sent}", flush=True)
+    print(f"[_tool_round] conversation has {len(conversation)} message(s)", flush=True)
+    started = perf_counter()
+    response = await openai.chat_once({
+        "model": request["model"],
+        "messages": conversation,
+        "tools": tools,
+        "tool_choice": tool_choice,
+    })
     assistant_message = (response.get("choices") or [{}])[0].get("message", {})
-    tool_calls = assistant_message.get("tool_calls") or []
     print(
-        "[agent.tool_decide]",
-        {
-            "agent": profile.name,
-            "round": round_index,
-            "tool_calls": len(tool_calls),
-            "elapsed_ms": elapsed_ms,
-            "model": request["model"],
-        },
+        "[agent.tool_round]",
+        {"agent": agent.name, "round": round_index, "tool_choice": tool_choice, "tool_calls": len(assistant_message.get("tool_calls") or []), "ms": round((perf_counter() - started) * 1000)},
         flush=True,
     )
     return assistant_message
 
 
 async def stream_agent_reply(request: dict[str, Any]):
-    total_started_at = perf_counter()
-    selected_agent_key = fallback_agent_key(request)
-    profile = AGENT_PROFILES[selected_agent_key]
-    conversation = _build_conversation(request, profile)
+    print("=" * 60, flush=True)
+    print(f"[stream_agent_reply] START", flush=True)
+    print(f"  model      : {request.get('model')}", flush=True)
+    print(f"  use_tools  : {request.get('use_tools')}", flush=True)
+    print(f"  messages   : {len(request.get('messages', []))} message(s)", flush=True)
+    last_msg = (request.get("messages") or [{}])[-1]
+    print(f"  last_msg   : role={last_msg.get('role')} content={str(last_msg.get('content', ''))[:120]!r}", flush=True)
+
+    agent = await _route(request)
+    print(f"[stream_agent_reply] agent selected → {agent.name}", flush=True)
+    print(f"  agent tools: {agent.tool_names}", flush=True)
+
+    conversation = _build_conversation(request, agent)
+    print(f"[stream_agent_reply] conversation built: {len(conversation)} message(s)", flush=True)
+
     tool_events: list[dict[str, Any]] = []
 
-    print(
-        "[agent.route]",
-        {"selected": profile.name, "strategy": "heuristic", "model": request["model"]},
-        flush=True,
-    )
-
-    if request.get("use_tools"):
+    # Tool-calling rounds
+    if not request.get("use_tools"):
+        print("[stream_agent_reply] use_tools=False — skipping tool rounds", flush=True)
+    else:
         for round_index in range(1, MAX_TOOL_ROUNDS + 1):
-            assistant_message = await _decide_tool_calls(request, profile, conversation, round_index)
+            print(f"[stream_agent_reply] --- tool round {round_index} ---", flush=True)
+            assistant_message = await _tool_round(request, agent, conversation, round_index)
+
+            finish_reason = assistant_message.get("finish_reason", "unknown")
             tool_calls = assistant_message.get("tool_calls") or []
+            print(f"[stream_agent_reply] round {round_index} result: finish_reason={finish_reason!r} tool_calls={len(tool_calls)}", flush=True)
+
             if not tool_calls:
+                print(f"[stream_agent_reply] no tool_calls returned — breaking out of tool loop", flush=True)
                 break
 
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_message.get("content") or "",
-                    "tool_calls": tool_calls,
-                }
-            )
+            conversation.append({
+                "role": "assistant",
+                "content": assistant_message.get("content") or "",
+                "tool_calls": tool_calls,
+            })
+
             for tool_call in tool_calls:
                 name = tool_call["function"]["name"]
-                raw_arguments = tool_call["function"].get("arguments") or "{}"
+                raw_args = tool_call["function"].get("arguments") or "{}"
                 try:
-                    arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 except json.JSONDecodeError:
-                    arguments = {}
-                event_id = str(uuid4())
-                yield {"type": "tool_start", "data": {"id": event_id, "name": name, "status": "running", "input": arguments, "output": ""}}
+                    args = {}
 
-                tool_started_at = perf_counter()
+                print(f"[stream_agent_reply] calling tool: {name}  args={args}", flush=True)
+                event_id = str(uuid4())
+                yield {"type": "tool_start", "data": {"id": event_id, "name": name, "status": "running", "input": args, "output": ""}}
+
+                started = perf_counter()
                 try:
-                    result = await asyncio.to_thread(execute_tool, name, arguments)
-                    event = {
-                        "id": event_id,
-                        "name": name,
-                        "status": "completed",
-                        "input": arguments,
-                        "output": result,
-                    }
+                    result = await asyncio.to_thread(execute_tool, name, args)
+                    elapsed = round((perf_counter() - started) * 1000)
+                    event = {"id": event_id, "name": name, "status": "completed", "input": args, "output": result}
                     conversation.append({"role": "tool", "tool_call_id": tool_call["id"], "content": result})
-                except Exception as exc:  # pragma: no cover - defensive path
-                    event = {
-                        "id": event_id,
-                        "name": name,
-                        "status": "failed",
-                        "input": arguments,
-                        "output": str(exc),
-                    }
+                    print(f"[stream_agent_reply] tool {name} → completed ({elapsed}ms)", flush=True)
+                    print(f"  result: {result[:200]!r}", flush=True)
+                except Exception as exc:
+                    elapsed = round((perf_counter() - started) * 1000)
+                    event = {"id": event_id, "name": name, "status": "failed", "input": args, "output": str(exc)}
                     conversation.append({"role": "tool", "tool_call_id": tool_call["id"], "content": str(exc)})
+                    print(f"[stream_agent_reply] tool {name} → FAILED ({elapsed}ms): {exc}", flush=True)
 
                 tool_events.append(event)
-                print(
-                    "[agent.tool_execute]",
-                    {
-                        "agent": profile.name,
-                        "name": name,
-                        "status": event["status"],
-                        "elapsed_ms": round((perf_counter() - tool_started_at) * 1000, 1),
-                    },
-                    flush=True,
-                )
                 yield {"type": "tool_end", "data": event}
-        else:
-            print(
-                "[agent.tool_decide]",
-                {"agent": profile.name, "warning": "max_tool_rounds_reached", "rounds": MAX_TOOL_ROUNDS},
-                flush=True,
-            )
 
-    stream_started_at = perf_counter()
-    first_token_ms: float | None = None
+    print(f"[stream_agent_reply] streaming final response (conversation={len(conversation)} msgs, tools_run={len(tool_events)})", flush=True)
+    # Stream final response
     accumulated = ""
-
-    print(
-        "[agent.stream_start]",
-        {
-            "agent": profile.name,
-            "conversation_messages": len(conversation),
-            "tool_events": len(tool_events),
-            "pre_stream_ms": round((stream_started_at - total_started_at) * 1000, 1),
-        },
-        flush=True,
-    )
-
-    async for chunk in openai.chat_stream(
-        {
-            "model": request["model"],
-            "messages": conversation,
-        }
-    ):
+    async for chunk in openai.chat_stream({"model": request["model"], "messages": conversation}):
         token = chunk.get("message", {}).get("content", "")
         if token:
             accumulated += token
-            if first_token_ms is None:
-                first_token_ms = round((perf_counter() - total_started_at) * 1000, 1)
-                print(
-                    "[agent.first_token]",
-                    {"agent": profile.name, "elapsed_ms": first_token_ms, "model": request["model"]},
-                    flush=True,
-                )
             yield {"type": "token", "data": token}
-
         if chunk.get("done"):
-            total_elapsed_ms = round((perf_counter() - total_started_at) * 1000, 1)
-            stream_elapsed_ms = round((perf_counter() - stream_started_at) * 1000, 1)
-            print(
-                "[agent.done]",
-                {
-                    "agent": profile.name,
-                    "response_length": len(accumulated),
-                    "tool_events": len(tool_events),
-                    "first_token_ms": first_token_ms,
-                    "stream_ms": stream_elapsed_ms,
-                    "total_ms": total_elapsed_ms,
-                },
-                flush=True,
-            )
-            yield {
-                "type": "done",
-                "data": {
-                    "content": accumulated,
-                    "tool_events": tool_events,
-                    "citations": [],
-                    "agent": profile.name,
-                },
-            }
+            print(f"[stream_agent_reply] DONE — response length={len(accumulated)} chars", flush=True)
+            print("=" * 60, flush=True)
+            yield {"type": "done", "data": {"content": accumulated, "tool_events": tool_events, "citations": [], "agent": agent.name}}
