@@ -1,11 +1,11 @@
 FROM node:20-slim
 
-WORKDIR /app/frontend
+WORKDIR /app
 
-COPY frontend/package.json /app/frontend/package.json
+COPY package.json /app/package.json
 
 RUN npm install
 
-COPY frontend /app/frontend
+COPY . /app
 
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
